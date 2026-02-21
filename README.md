@@ -2,6 +2,9 @@
 
 Converte ogni pagina di un PDF in una slide PowerPoint con testo nativo selezionabile e sfondo fedele all'originale.
 
+https://pdf2pptxfree.streamlit.app/
+
+
 ## Come funziona
 
 Per ogni pagina del PDF l'app applica una pipeline a tre strati:
