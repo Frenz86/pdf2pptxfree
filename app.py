@@ -1,5 +1,5 @@
 """
-📄 PDF → PPTX Converter
+📄 PDF → WORD PPTX Converter
 """
 
 import streamlit as st
@@ -10,10 +10,12 @@ from pptx.dml.color import RGBColor
 from pptx.util import Pt
 from PIL import Image, ImageDraw
 from collections import Counter
+from docx import Document
+from docx.shared import Inches, Pt as DocxPt, RGBColor as DocxRGBColor
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PDF → PPTX",
+    page_title="PDF → DOCX - PPTX",
     page_icon="📄",
     layout="centered",
 )
@@ -48,9 +50,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Header ────────────────────────────────────────────────────────────────────
-st.title("📄 PDF → PPTX Converter")
-st.caption("Converte ogni pagina in una slide con layer di testo selezionabile.")
-st.image('aa.jpg',use_column_width=True)
+st.title("📄 PDF Converter")
+st.caption("Converte ogni pagina PDF in PPTX o DOCX con testo selezionabile. ⚠️ Non esegue OCR: funziona solo con PDF che contengono testo nativo.")
+st.image('aa.jpg', use_container_width=True)
 st.divider()
 
 # ── File upload ───────────────────────────────────────────────────────────────
@@ -65,24 +67,37 @@ uploaded = st.file_uploader(
 # ── Settings ──────────────────────────────────────────────────────────────────
 st.subheader("⚙️ Impostazioni")
 
+output_format = st.radio(
+    "Formato di output",
+    options=["PPTX", "DOCX"],
+    index=0,
+    horizontal=True,
+)
+
 col1, col2 = st.columns(2)
 
 with col1:
-    dpi = st.select_slider(
-        "Qualità immagine (DPI)",
-        options=[72, 100, 150, 200, 250, 300],
-        value=150,
-        help="DPI per le pagine scansionate (senza testo nativo).",
-    )
+    if output_format == "PPTX":
+        dpi = st.select_slider(
+            "Qualità immagine (DPI)",
+            options=[72, 100, 150, 200, 250, 300],
+            value=150,
+            help="DPI per le pagine scansionate (senza testo nativo).",
+        )
+    else:
+        dpi = 150
+        st.empty()
 
 with col2:
+    ext = ".pptx" if output_format == "PPTX" else ".docx"
+    default_name = f"file_convertito{ext}"
     output_name = st.text_input(
         "Nome file di output",
-        value="presentazione.pptx",
-        help="Il file PPTX sarà scaricabile con questo nome.",
+        value=default_name,
+        help="Il file sarà scaricabile con questo nome.",
     )
-    if not output_name.endswith(".pptx"):
-        output_name += ".pptx"
+    if not output_name.endswith(ext):
+        output_name = output_name.rsplit(".", 1)[0] + ext
 
 st.divider()
 
@@ -267,15 +282,121 @@ def convert(pdf_bytes: bytes, dpi: int) -> bytes:
     return out.getvalue(), info_rows
 
 
+# ── Conversion logic — DOCX ───────────────────────────────────────────────────
+
+def convert_to_docx(pdf_bytes: bytes, dpi: int):
+    """Converte PDF in DOCX — testo nativo o immagine per pagine scansionate."""
+
+    def clean_font_name(raw):
+        name = raw.split("+")[-1]
+        name = name.replace("-", " ").split(",")[0].strip()
+        return name or "Calibri"
+
+    def int_to_docx_rgb(c):
+        r = (c >> 16) & 0xFF
+        g = (c >> 8)  & 0xFF
+        b =  c        & 0xFF
+        return DocxRGBColor(r, g, b)
+
+    doc      = fitz.open(stream=pdf_bytes, filetype="pdf")
+    n        = len(doc)
+    word_doc = Document()
+
+    for section in word_doc.sections:
+        section.top_margin    = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin   = Inches(0.75)
+        section.right_margin  = Inches(0.75)
+
+    progress  = st.progress(0, text="Conversione in corso…")
+    info_rows = []
+
+    for i in range(n):
+        page       = doc[i]
+        raw        = page.get_text("text").strip()
+        is_native  = len(raw) >= 10
+        word_count = 0
+
+        if is_native:
+            blocks = page.get_text(
+                "dict",
+                flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_MEDIABOX_CLIP,
+            )["blocks"]
+
+            for block in blocks:
+                btype = block.get("type", 0)
+
+                if btype == 1:
+                    img_bytes = block.get("image")
+                    if img_bytes:
+                        try:
+                            para = word_doc.add_paragraph()
+                            run  = para.add_run()
+                            run.add_picture(io.BytesIO(img_bytes), width=Inches(5))
+                        except Exception:
+                            pass
+                    continue
+
+                for line in block.get("lines", []):
+                    para = word_doc.add_paragraph()
+                    for span in line.get("spans", []):
+                        txt = span.get("text", "")
+                        if not txt:
+                            continue
+                        run = para.add_run(txt)
+                        word_count += len(txt.split())
+
+                        font_size = span.get("size", 12)
+                        run.font.size = DocxPt(font_size)
+
+                        flags = span.get("flags", 0)
+                        run.font.bold   = bool(flags & 16)
+                        run.font.italic = bool(flags & 2)
+
+                        color = span.get("color", 0)
+                        run.font.color.rgb = int_to_docx_rgb(color)
+
+                        font_name = span.get("font", "")
+                        if font_name:
+                            run.font.name = clean_font_name(font_name)
+
+            mode = "native"
+        else:
+            pix    = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+            img_io = io.BytesIO(pix.tobytes("png"))
+            para   = word_doc.add_paragraph()
+            run    = para.add_run()
+            run.add_picture(img_io, width=Inches(6))
+            mode = "OCR (immagine)"
+
+        info_rows.append((i + 1, mode, word_count))
+        progress.progress((i + 1) / n, text=f"Pagina {i+1}/{n}  [{mode}]")
+
+        if i < n - 1:
+            word_doc.add_page_break()
+
+    progress.empty()
+    doc.close()
+
+    out = io.BytesIO()
+    word_doc.save(out)
+    return out.getvalue(), info_rows
+
+
 # ── Convert button ────────────────────────────────────────────────────────────
 if uploaded is not None:
     st.success(f"File caricato: **{uploaded.name}** ({uploaded.size / 1024:.1f} KB)")
 
-    if st.button("🚀 Converti in PPTX", type="primary", use_container_width=True):
+    if st.button(f"🚀 Converti in {output_format}", type="primary", use_container_width=True):
         try:
             pdf_bytes = uploaded.read()
             with st.spinner("Elaborazione in corso…"):
-                pptx_bytes, info = convert(pdf_bytes, dpi)
+                if output_format == "PPTX":
+                    result_bytes, info = convert(pdf_bytes, dpi)
+                    mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                else:
+                    result_bytes, info = convert_to_docx(pdf_bytes, dpi)
+                    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
             st.success("✅ Conversione completata!")
 
@@ -300,10 +421,10 @@ if uploaded is not None:
 
             # Download
             st.download_button(
-                label="⬇️ Scarica PPTX",
-                data=pptx_bytes,
+                label=f"⬇️ Scarica {output_format}",
+                data=result_bytes,
                 file_name=output_name,
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                mime=mime,
                 use_container_width=True,
                 type="primary",
             )
